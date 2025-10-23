@@ -6,7 +6,6 @@ __pycache__
 *.vtk
 *.pvtu
 *.swp
-*.geo
 *.npy
 *.png
 build/
