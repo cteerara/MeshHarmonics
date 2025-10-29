@@ -74,7 +74,7 @@ class MeshHarmonicsSolver(SteadyScalarTransport):
         # Set laplacian and mass form
         a_form = self._diffusive_form(u, D) # Laplacian matrix
         m_form = u*w*self.dx # Mass matrix
-        
+
         # Set dirichlet boundary if any exist
         zero = flatiron_tk.constant(self.mesh, 0.)
         bc_dict = {}
@@ -158,33 +158,31 @@ class MeshHarmonicsSolver(SteadyScalarTransport):
             self._H.setValues(range(n), [_j], v.getArray(), addv=PETSc.InsertMode.INSERT_VALUES)
         self._H.assemble()
 
-        self._MH = self._M.matMult(self._H)
+        # self._MH = self._M.matMult(self._H)
+        MH = self._M.matMult(self._H)
+        self._HTM = MH.copy()
+        self._HTM.transpose()
+        # self._HTM = self._H.transposeMatMult(self._M)
 
-        # Verify that our matrix is orthonormal
-        C = self._M.matMult(self._H)
-        D = self._H.transposeMatMult(C)
-        D = D.getDenseArray()
-        print(D)
-        # D.view()
+        # # Verify that our matrix is orthonormal (in the M norm sense)
+        # C = self._M.matMult(self._H)
+        # D = self._H.transposeMatMult(C)
+        # print(D.getDenseArray())
 
     def fMHT(self, f):
-        P, B = self._MH.getSize()
-
-        # Set PETSc vector of the point-wise value
+        B, P = self._HTM.getSize()
+        f_hat = PETSc.Vec().createMPI(B, comm=self.mesh.msh.comm)
         f_petsc = PETSc.Vec().createMPI(P, comm=self.mesh.msh.comm)
         f_petsc.setArray(f)
-
-        # Create basis-space as a target
-        f_hat = PETSc.Vec().createMPI(B, comm=self.mesh.msh.comm)
-        self._MH.multTranspose(f_petsc, f_hat)
+        self._HTM.mult(f_petsc, f_hat)
         return f_hat
+        # P, B = self._MH.getSize()
+
 
     def iMHT(self, f_hat):
-        P, B = self._MH.getSize()
-
+        B, P = self._HTM.getSize()
         f_hat_petsc = PETSc.Vec().createMPI(B, comm=self.mesh.msh.comm)
         f_hat_petsc.setArray(f_hat)
-
         f = PETSc.Vec().createMPI(P, comm=self.mesh.msh.comm)
         self._H.mult(f_hat_petsc, f)
         return f
@@ -253,76 +251,3 @@ class MeshHarmonicsSolver(SteadyScalarTransport):
         end = offsets[i+1]
         return array[start:end]
 
-
-def get_dfx_surface_mesh(dfx_msh):
-    facets = dfx_msh.topology.connectivity(2, 0).array.reshape((-1, 3))
-    vertices = dfx_msh.geometry.x[:]
-    return vertices, facets
-
-def create_msh(stl_file):
-    geo_str = 'Mesh.MshFileVersion = 2.0;\nMerge "%s";\nSurface Loop(1) = {1};\nPhysical Surface(1) = {1};'%(stl_file.split("/")[-1])
-    with open(stl_file[:-3]+'geo', 'w') as fid:
-        fid.write(geo_str)
-    os.system('gmsh -2 %s -o %s'%(stl_file[:-3]+'geo', stl_file[:-3]+'msh'))
-    return stl_file[:-3]+'msh'
-
-
-if __name__ == '__main__':
-
-    from meshprep.io import read_mesh, write_mesh
-
-    # V_LA, F_LA = read_mesh('/mnt/d/CTeeraratkul/ExternalData/2018_UTAH_MICCAI/Testing Set/4URSJYI2QUH1T5S5PP47/Segmentation_Segment_1.stl')
-    # xc_LA = np.mean(V_LA, axis=0)
-    # r_LA = np.max([np.linalg.norm(p-xc_LA) for p in V_LA])
-    # V, F = read_mesh('mesh/sphere_0.0500.stl')
-
-    V, F = read_mesh('mesh/sphere_0.0500.stl')
-    eps = 2e-2
-    V = V + np.random.uniform(-eps, eps, V.shape)
-    write_mesh(V, F, 'tmp_mesh.stl')
-
-    num_modes = 36
-    msh_file = create_msh('tmp_mesh.stl')
-    mesh = Mesh(mesh_file=msh_file, gdim=3)
-    mht = MeshHarmonicsSolver(mesh, num_modes=num_modes, lump_mass=False)
-    mht.build_eigen_problem()
-    mht.solve()
-
-    point_data = {}
-    mesh_V, mesh_F = get_dfx_surface_mesh(mesh.msh)
-
-    x_hat = mht.fMHT(mesh_V[:,0])
-    y_hat = mht.fMHT(mesh_V[:,1])
-    z_hat = mht.fMHT(mesh_V[:,2])
-
-    new_mesh_V = np.zeros(mesh_V.shape)
-    new_mesh_V[:,0] = mht.iMHT(x_hat)
-    new_mesh_V[:,1] = mht.iMHT(y_hat)
-    new_mesh_V[:,2] = mht.iMHT(z_hat)
-
-    write_mesh(mesh_V, mesh_F, 'mesh_original.stl')
-    write_mesh(new_mesh_V, mesh_F, 'mesh_T.stl')
-
-    sys.exit()
-
-    x = mesh_V[:,0]
-    x_noisy = x + np.random.uniform(-eps, eps, len(x))
-    x_hat = mht.fMHT(x_noisy)
-    plt.semilogy(np.abs(x_hat))
-    plt.grid(True)
-    plt.show()
-
-    x_T = mht.iMHT(x_hat)
-    x_f = mht.iMHT(x_hat*g_hat)
-
-    # U = mht._H.getDenseArray()
-    # for i in range(U.shape[1]):
-    #     point_data['U%03d'%i] = U[:,i]
-    point_data['g'] = g
-    point_data['g2'] = g2
-    point_data['x_noisy'] = x_noisy
-    point_data['x_T'] = x_T
-    point_data['x_filt'] = x_f
-
-    smesh = meshio.Mesh(mesh_V, [("triangle", mesh_F)], point_data=point_data)
-    smesh.write('f.vtu')

@@ -34,42 +34,22 @@ def get_dfx_surface_mesh(dfx_msh):
     return vertices, facets
 
 
-# stl_file = 'mesh/sphere_clipped_rm.stl'
-stl_file = 'mesh/sphere_0.0500.stl'
+stl_file = 'mesh/sphere_clipped_rm.stl'
+# stl_file = 'mesh/sphere_0.0500.stl'
 msh_file = create_msh(stl_file)
 mesh = Mesh(mesh_file=msh_file, gdim=3)
 num_modes = 36
 mht = MeshHarmonicsSolver(mesh, num_modes=num_modes, lump_mass=False)
-# mht.build_eigen_problem(homogeneous_bnds=[1,2,3,4,5])
-mht.build_eigen_problem()
+mht.build_eigen_problem(homogeneous_bnds=[4,5])
 mht.solve()
 
 U = mht.get_eigen_functions()
-
 mesh_V, mesh_F = get_dfx_surface_mesh(mesh.msh)
 point_data = {}
 for i in range(U.shape[1]):
     point_data['U%03d'%i] = U[:,i]
+# point_data['f'] = f
+# point_data['f_2'] = f_2
 smesh = meshio.Mesh(mesh_V, [("triangle", mesh_F)], point_data=point_data)
 smesh.write('U.vtu')
-
-# zero = flatiron_tk.constant(mesh, 0.)
-# one = flatiron_tk.constant(mesh, 1.)
-# bc_dict = {
-#     1: {'type': 'dirichlet', 'value': zero},
-#     2: {'type': 'dirichlet', 'value': zero},
-#     3: {'type': 'dirichlet', 'value': one},
-#     4: {'type': 'dirichlet', 'value': zero},
-#     5: {'type': 'dirichlet', 'value': zero},
-# }
-# stp.set_bcs(bc_dict)
-# problem = NonLinearProblem(stp)
-# solver = NonLinearSolver(mesh.msh.comm, problem)
-# solver.solve()
-# phi = stp.solution.x.array
-# pp = phi * (1-phi)
-# psi = pp/np.max(pp)
-# # stp.solution.x.array[:] = psi
-# return psi, phi
-
 
