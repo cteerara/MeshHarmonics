@@ -9,6 +9,7 @@ import copy
 import matplotlib.pyplot as plt
 from flatiron_tk.mesh import Mesh
 from flatiron_tk.physics import SteadyScalarTransport
+import flatiron_tk
 from meshprep.features import Holes
 import dolfinx
 import meshio
@@ -18,7 +19,7 @@ from petsc4py import PETSc
 from slepc4py import SLEPc
 from mpi4py import MPI
 
-class MeshHarmonicsTransform(SteadyScalarTransport):
+class MeshHarmonicsSolver(SteadyScalarTransport):
     '''
     This problem solve for the Eigenfunction of the Laplacian operator on a manifold mesh.
 
@@ -37,19 +38,30 @@ class MeshHarmonicsTransform(SteadyScalarTransport):
 
         super().__init__(*args, **kwargs)
 
+        self._num_bnds = self._mark_manifold_boundaries()
+
     def get_num_modes(self):
         _, B = self._H.getSize()
         return B
 
-    def build_eigen_problem(self, bc_type='neumann', bc_dofs=[], space_family='CG', space_deg=1):
+    def build_eigen_problem(self, homogeneous_bnds=[], space_family='CG', space_deg=1):
 
         '''
-        bc_type is either neumann or dirichlet
+        homogeneous_bnds is a list of dirichlet bnds used
         '''
 
-        assert(bc_type == 'neumann' or bc_type == 'dirichlet')
-        self._bc_type = bc_type
+        self._homogeneous_bnds = homogeneous_bnds
+        for bnd_idx in homogeneous_bnds:
+            assert(bnd_idx <= self._num_bnds) # bnd_idx starts at 1
 
+        # Detect whether this is a pure Neumann problem
+        # We do this because we need to account for the single nullspace
+        # that wrise in a pure Neumann problem
+        self._pure_neumann = False
+        if len(homogeneous_bnds)==0:
+            self._pure_neumann = True
+
+        # Set function space
         self.set_element(space_family, space_deg)
         self.build_function_space()
         self.set_diffusivity(1.)
@@ -59,11 +71,19 @@ class MeshHarmonicsTransform(SteadyScalarTransport):
         u = ufl.TrialFunction(V)
         w = self.get_test_function()
 
+        # Set laplacian and mass form
         a_form = self._diffusive_form(u, D) # Laplacian matrix
         m_form = u*w*self.dx # Mass matrix
+        
+        # Set dirichlet boundary if any exist
+        zero = flatiron_tk.constant(self.mesh, 0.)
+        bc_dict = {}
+        for bnd_idx in self._homogeneous_bnds:
+            bc_dict[bnd_idx] = {'type': 'dirichlet', 'value': zero}
+        self.set_bcs(bc_dict)
 
-        self._A = self._assemble_form(a_form)
-        self._M = self._assemble_form(m_form)
+        self._A = self._assemble_form(a_form, self.dirichlet_bcs)
+        self._M = self._assemble_form(m_form, self.dirichlet_bcs)
 
         if self._lump_mass:
             M_row_sum = self._lump_matrix(self._M)
@@ -71,7 +91,7 @@ class MeshHarmonicsTransform(SteadyScalarTransport):
             M_lumped.setDiagonal(M_row_sum)
             self._M = M_lumped
 
-    def _apply_neumann_bcs(self):
+    def _deflate_nullspace(self):
         '''
         Here, we handle a case where no Dirichlet boundary condition is applied to the matrix.
         The Laplacian operator has rank n-1 when no Dirichlet BC is applied and we will get
@@ -96,9 +116,6 @@ class MeshHarmonicsTransform(SteadyScalarTransport):
         # Deflate the space with the constant vector
         self._EPS.setDeflationSpace([self._const_vec])
 
-    def _apply_dirichlet_bcs(self):
-        raise ValueError("Not implemented yet!")
-
     def solve(self):
 
         # Solve eigenvalue problem
@@ -106,10 +123,8 @@ class MeshHarmonicsTransform(SteadyScalarTransport):
         self._EPS.setOperators(self._A, self._M)
         self._EPS.setProblemType(SLEPc.EPS.ProblemType.GHEP)
 
-        if self._bc_type == 'dirichlet':
-            self._apply_dirichlet_bcs()
-        else:
-            self._apply_neumann_bcs()
+        if self._pure_neumann:
+            self._deflate_nullspace()
 
         # Smallest eigenvalues
         # We should only expect positive eigenvalues since Laplacian is SPSD
@@ -123,14 +138,14 @@ class MeshHarmonicsTransform(SteadyScalarTransport):
         self._set_transform_matrix()
         return self._EPS
 
-    def _set_transform_matrix(self):
-        if self._bc_type == 'neumann':
-            self._set_transform_matrix_neumann()
-        elif self._bc_type == 'dirichlet':
-            self._set_transform_matrix_dirichlet()
+    def get_eigen_functions(self):
+        return self._H.getDenseArray()
 
-    def _set_transform_matrix_neumann(self):
-        eigvecs = [self._const_vec]
+    def _set_transform_matrix(self):
+        eigvecs = []
+        if self._pure_neumann:
+            eigvecs.append(self._const_vec)
+
         for i in range(self._requested_num_modes):
             _, vr, _ = self.get_eigen_pair(i)
             eigvecs.append(vr)
@@ -145,9 +160,11 @@ class MeshHarmonicsTransform(SteadyScalarTransport):
 
         self._MH = self._M.matMult(self._H)
 
-        # # Verify that our matrix is orthonormal
-        # C = self._M.matMult(self._H)
-        # D = self._H.transposeMatMult(C)
+        # Verify that our matrix is orthonormal
+        C = self._M.matMult(self._H)
+        D = self._H.transposeMatMult(C)
+        D = D.getDenseArray()
+        print(D)
         # D.view()
 
     def fMHT(self, f):
@@ -198,6 +215,45 @@ class MeshHarmonicsTransform(SteadyScalarTransport):
         M_row_sum = M.getDiagonal()
         return M_row_sum
 
+    def _mark_manifold_boundaries(self):
+
+        mesh = self.mesh
+        tp = mesh.msh.topology
+        tp.create_connectivity(mesh.get_fdim(), mesh.get_tdim())
+        tp.create_connectivity(2, 0)
+        tp.create_connectivity(0, 1)
+        tp.create_connectivity(1, 0)
+        v2e = tp.connectivity(0, 1)
+        num_edges = len(tp.connectivity(1,0).offsets)-1
+        F = tp.connectivity(2, 0).array.reshape((-1, 3))
+        vertices = mesh.msh.geometry.x[:]
+        _holes = Holes(vertices, F)
+        bnd_edges = []
+        edge_tag = []
+        for hole_idx, vertices_list in enumerate(_holes.boundary_ids()):
+            for vi in vertices_list:
+                for ei in self._get_row_data(v2e, vi):
+                    if not self._is_boundary_edge(tp, ei): continue
+                    bnd_edges.append(ei)
+                    edge_tag.append(hole_idx+1)
+        bnd = dolfinx.mesh.meshtags(mesh.msh, 1, bnd_edges, edge_tag)
+        mesh.boundary = bnd
+
+        return _holes.num_holes()
+
+    def _is_boundary_edge(self, tp, ei):
+        conn = tp.connectivity(1, 2)
+        connected_facet = self._get_row_data(conn, ei)
+        return (len(connected_facet) == 1)
+
+    def _get_row_data(self, conn, i):
+        array = conn.array
+        offsets = conn.offsets
+        start = offsets[i]
+        end = offsets[i+1]
+        return array[start:end]
+
+
 def get_dfx_surface_mesh(dfx_msh):
     facets = dfx_msh.topology.connectivity(2, 0).array.reshape((-1, 3))
     vertices = dfx_msh.geometry.x[:]
@@ -228,7 +284,7 @@ if __name__ == '__main__':
     num_modes = 36
     msh_file = create_msh('tmp_mesh.stl')
     mesh = Mesh(mesh_file=msh_file, gdim=3)
-    mht = MeshHarmonicsTransform(mesh, num_modes=num_modes, lump_mass=False)
+    mht = MeshHarmonicsSolver(mesh, num_modes=num_modes, lump_mass=False)
     mht.build_eigen_problem()
     mht.solve()
 
