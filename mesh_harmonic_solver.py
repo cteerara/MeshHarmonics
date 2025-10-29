@@ -84,7 +84,6 @@ class MeshHarmonicsTransform(SteadyScalarTransport):
         self._const_vec = self._A.createVecLeft()
         self._const_vec.set(1.0)
         self._const_vec.assemble()
-        # self._const_vec.normalize()
 
         # Normalize const_vec in an M-norm sense.
         # Define constant vector: x = _self.const_vec
