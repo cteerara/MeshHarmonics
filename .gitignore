@@ -19,3 +19,6 @@ scratch/
 *.xml.gz
 *.h5
 *.xdmf
+!la_003.stl
+!la_003_cs.stl
+steps/

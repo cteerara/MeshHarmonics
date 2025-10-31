@@ -34,13 +34,14 @@ def get_dfx_surface_mesh(dfx_msh):
     return vertices, facets
 
 
-stl_file = 'mesh/sphere_clipped_rm.stl'
+# stl_file = 'mesh/sphere_clipped_rm.stl'
 # stl_file = 'mesh/sphere_0.0500.stl'
+stl_file = 'mesh_T.stl'
 msh_file = create_msh(stl_file)
 mesh = Mesh(mesh_file=msh_file, gdim=3)
-num_modes = 36
+num_modes = 100
 mht = MeshHarmonicsSolver(mesh, num_modes=num_modes, lump_mass=False)
-mht.build_eigen_problem(homogeneous_bnds=[4,5])
+mht.build_eigen_problem()
 mht.solve()
 
 U = mht.get_eigen_functions()
